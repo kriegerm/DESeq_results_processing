@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
 
-
 #annotate_DESeq2_results.py
-#UDPATED: 12/21/22
+#UDPATED: 12/30/22
 #It's very annoying how DESEq2 usually gives a mixture of locus tags and gene names, and it's even more annoying when you're trying to use the OLD locus tags for something (like kEGG analysis!)
-#So this code takes in a csv of DEGs with the "Gene	baseMean	log2FoldChange	lfcSE	stat	pvalue	padj" header.
+#So this code takes in a csv of DEGs with the "Gene	baseMean	log2FoldChange	lfcSE	stat	pvalue	padj" header. If you have the counts or anyhting extra on there, it'll be lost.
 #It'll take in a NewGenbank file with the fancy new identifiers that they have for species like S. mutans, and then give you a csv
 #With all the important info from the DEG results as well as  all the informatio you could ever want from the genbank file!
+
+#NOTES ABOUT THIS CODE OUTPUT:
+#####-Column A "Gene and column B "Gene_name_check" should be identical. This is a sanity check.
+#####-If there is a "*" next to the gene name in column B, that means that there were TWO or more entries for that gene name in the genbank file! If you used a gb to map the reads,
+######which you did, then sometimes the mapper uses the gene names (like "gyrA") instead of the unique identifiers (like "SMU_001"). There can be multiple copies of "gyrA" in a genome,
+######so if you are looking at enrichmnet in operons this might mess things up because it's unclear which "gyrA" the reads are mapping to. So just be careful with these!
+######It's also good to remember that the protein ID and product of these genes may be incorrect, because it's not clear if the reads mapped to this particular gene copy or not.
 
 import sys
 from Bio import SeqIO
 import csv
+import pandas as pd
+import numpy as np
 
-def DEGS_to_KEGG(DEGS_csv, NewGenbank, outputcsv):
+def annotate_DESeq2_results(DEGS_csv, NewGenbank):
 
     old_locus_tags_list = []
     log2FC_list = []
@@ -83,13 +91,19 @@ def DEGS_to_KEGG(DEGS_csv, NewGenbank, outputcsv):
         elif i not in duplicateList:
             duplicateList.append(i)
 
+    duplicateList2 = [] #This just makes the duplicate list more manageable, because right now it's a list of lists and that's not helpful
     if len(duplicateList) != 0:
-        print("WARNING: Your genbank file contains multiple annotations for the following genes. Make sure you examine your output closely to ensure that you are actually looking at the gene you think you are. Next time, it's better to use unique gene names to map your reads!")
-        for item in duplicateList:
-            print(item[0])
+        for thing in duplicateList:
+            duplicateList2.append(thing[0])
+
+#Optional warning message if you really care about looking through your genbank file
+    #    print("WARNING: Your genbank file contains multiple annotations for the following genes. Make sure you examine your output closely to ensure that you are actually looking at the gene you think you are. Next time, it's better to use unique gene names to map your reads!")
+    #    for item in duplicateList:
+    #        print(item[0])
 
 
 #Now we are ready to look through the list of old locus tags and extract more info about them from the Genbank dictionary.
+    results_list = []
     locus_tag_list = []
     original_locus_tag_list = []
     protein_id_list = []
@@ -103,6 +117,8 @@ def DEGS_to_KEGG(DEGS_csv, NewGenbank, outputcsv):
         if item in Genbank_dict.keys(): #If there's an entry for that item in the genbank dictionary, which there should be
             count = count + 1
             entry_dict = Genbank_dict[item] #We are going inception here to access the dictionary within the dictionary!
+
+            results_list.append(item)
 
             if str("locus_tag") in entry_dict.keys():
                 locus_tag_fromdict = []
@@ -160,6 +176,12 @@ def DEGS_to_KEGG(DEGS_csv, NewGenbank, outputcsv):
                     if gene[0] == item and count == 0: #if the gene name matches up with what's in the dictionary AND we haven't already looked at an entry with that gene name
                         count = count + 1
 
+                        if item in duplicateList2:
+                            item2 = str(item+"*")
+                            results_list.append(item2)
+                        if item not in duplicateList2:
+                            results_list.append(item)
+
                         if str("locus_tag") in entry_dict.keys():
                             locus_tag_fromdict = []
                             locus_tag_fromdict = list(entry_dict["locus_tag"])
@@ -206,6 +228,7 @@ def DEGS_to_KEGG(DEGS_csv, NewGenbank, outputcsv):
                             GO_pathway_list.append("No GO pathway found")
 
         if count == 0: #If there's not an entry for that item in the genbank dictionary, which shouldn't happen but I guess it could
+            results_list.append(item + " NOT FOUND IN GB")
             locus_tag_list.append("NOT IN GB FILE (probably a new gene)")
             original_locus_tag_list.append("NA")
             product_list.append("NA")
@@ -213,31 +236,28 @@ def DEGS_to_KEGG(DEGS_csv, NewGenbank, outputcsv):
             GO_function_list.append("NA")
             GO_pathway_list.append("NA")
 
-
 #We will just compare all the lists to make sure they are the same length and everything looks OK. If they aren't, you're goin to have to troubleshoot!
-    if len(old_locus_tags_list) != len(original_locus_tag_list)!= len(locus_tag_list) != len(log2FC_list)  != len(pval_list) != len(padj_list)  != len(protein_id_list) != len(product_list) != len(GO_function_list) != len(GO_pathway_list):
+    if len(results_list) != len(old_locus_tags_list) != len(original_locus_tag_list)!= len(locus_tag_list) != len(log2FC_list)  != len(pval_list) != len(padj_list)  != len(protein_id_list) != len(product_list) != len(GO_function_list) != len(GO_pathway_list):
         print("WARNING: LENGTHS OF LISTS DO NOT MATCH!!!")
         exit()
 
-#Time to write out the results! So exciting!
-    #Write a header
-    with open(outputcsv, 'a') as fh:
-            writer = csv.writer(fh)
-            header = ['Original_Gene_Name', 'KEGG_locus_tag', 'New_locus_tag', 'Log2FC', 'pvalue', 'padj', 'Protein_ID', 'Product', 'GO_function', 'GO_pathway']
-            writer.writerow(header)
-
-    #Write the data back to a csv file as  your results
+#Time to write out the results! So exciting! I'm using pandas to merge the original file with the new annotation file
+    df = pd.DataFrame(columns=('Gene', 'Gene_name_check', 'KEGG_locus_tag', 'New_locus_tag', 'Protein_ID', 'Product', 'GO_function', 'GO_pathway'))
     for i in range(len(locus_tag_list)):
         row = []
-        row = [old_locus_tags_list[i], original_locus_tag_list[i], locus_tag_list[i], log2FC_list[i], pval_list[i], padj_list[i], protein_id_list[i], product_list[i], GO_function_list[i], GO_pathway_list[i]]
-        with open(outputcsv, 'a') as fh:
-            writer = csv.writer(fh)
-            writer.writerow(row)
+        row = [old_locus_tags_list[i], results_list[i], original_locus_tag_list[i], locus_tag_list[i], protein_id_list[i], product_list[i], GO_function_list[i], GO_pathway_list[i]]
+        df.loc[len(df)] = row
+
+    outputcsv = str(DEGS_csv.rstrip(".csv") + "_annotated.csv")
+    original_file = pd.read_csv(DEGS_csv)
+    merged = original_file.merge(df, on='Gene')    #This may throw an error if the gene names aren't identical...but in that case, you have a bigger problem!
+    merged.to_csv(outputcsv, index=False)
 
 #This little block just handles how many input variables you give it to make sure you have the correct number of arguments
 if __name__ == '__main__':
-    if len(sys.argv) == 4:
-         DEGS_to_KEGG(sys.argv[1], sys.argv[2], sys.argv[3])
+    if len(sys.argv) == 3:
+         annotate_DESeq2_results(sys.argv[1], sys.argv[2])
     else:
-         print("Usage: locus tags csv, gb, outputcsv")
+         print("Usage: DEGS csv, gb")
          sys.exit(0)
+
