@@ -1,0 +1,496 @@
+---
+title: "6.23_Stephanie_RNA-seq"
+author: "Madeline Krieger"
+date: '2023-06-02'
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    fig_width: 4
+
+editor_options: 
+  markdown: 
+    wrap: 72
+
+---
+
+## Starting Information
+
+# Resources for understanding this output
+Some great resources to check for information on any of the included plots are listed below:
+<http://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#variance-stabilizing-transformation>
+<https://www.bioconductor.org/help/course-materials/2015/CSAMA2015/lab/rnaseqCSAMA.html>
+<http://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html>
+
+# Note about Log2FC Values
+The Log2FC is calculated with the control as the reference value. So if there is a positive Log2FC value, that means that there are MORE counts in the control sample.
+
+# How to run this code:
+In the same folder that your R markdown file is located in, you need two other files:
+
+**raw_counts.txt** should be a file of all the raw counts from gene expression analysis. Here is an example:
+```{r}
+#	BLBGC-5	BLBGC-4	BLBGC-3	BLBGC-2	BLBGC-1	but-5	but-4	but-3
+#D3841_RS08990	261	257	293	270	249	245	181	192
+#D3841_RS08995	4166	4348	4556	4132	4089	3968	1777	1729
+#D3841_RS09000	93	111	63	97	88	70	65	60
+#D3841_RS09005	38762	43507	44741	42168	44999	9587	11524	12146
+#D3841_RS09010	63913	68432	65276	65303	67115	13810	15555	16756
+```
+
+
+**conditions.txt** should be a list of the conditions/groups your samples are in. The sample names need to be in the same order as your raw_counts.txt headers. Here is an example:
+
+Sample_ID	condition	Rep
+BLBGC-5	BLBGC	1
+BLBGC-4	BLBGC	2
+BLBGC-3	BLBGC	3
+BLBGC-2	BLBGC	4
+BLBGC-1	BLBGC	5
+but-5	but	1
+but-4	but	2
+but-3	but	3
+but-2	but	4
+but-1	but	5
+
+
+```{r setup-chunk, include=FALSE}
+knitr::opts_chunk$set(dev = "png",
+                      dpi = 300,
+                      echo = TRUE,
+                      cache = TRUE)
+```
+
+
+# Loading Libraries
+```{r load_libraries, warning = FALSE}
+library("DESeq2")
+library("tidyverse")
+library('EnhancedVolcano')
+library('pheatmap')
+library('RColorBrewer')
+library("genefilter")
+library("PoiClaClu")
+library(knitr)
+library(here)
+
+
+here::here()
+```
+
+# 1.0 All Samples, All Groups
+
+**Loading in data**
+```{r load_data}
+countData = read.csv(paste0("raw_counts.csv"), header=TRUE, row.names = 1, check.names=FALSE, sep="," )
+colData = read.table(file= paste0("conditions.txt"), fill=TRUE, header=TRUE, check.names=FALSE, row.names=1 )
+
+print(colData)
+```
+
+## Run DESeq2
+
+**Define some variables for future plots**
+```{r def_variables_all}
+groups = c("BLBGC", "but","cdaA",  "lad", "UA159", "UAB10")
+colors = c("#003f5c", "chartreuse1", "darkviolet", "#ff6361", "#ffa600", "dodgerblue")
+```
+
+**Run DESeq2**
+```{r run_DESeq_all}
+dds <- DESeqDataSetFromMatrix(countData = countData, colData = colData, design = ~condition)
+dds <- DESeq(dds)
+```
+
+**Transform data**
+```{r data_transformations_all}
+rld <- rlog(dds)
+vsd <- vst(dds)
+```
+
+
+## Heat map of sample distances
+```{r heatmap_all,fig.height=8, fig.width=8,  dpi = 500}
+
+#Preparing Annotation Dataframe
+df <- as.data.frame(colData(rld))
+df <- select(df, -Rep, -sizeFactor )
+rownames(df) <- colnames(rld)
+names(colors) = groups
+ann_colors = list(condition = colors)
+
+#Preparing Sample Distnace Matrix
+sampleDists <- dist( t( assay(rld) ) )
+sampleDistMatrix <- as.matrix(sampleDists)
+colnames(sampleDistMatrix) <- NULL
+
+#Create the Heatmap with Pheatmap
+heatmap <- pheatmap(sampleDistMatrix,
+                    clustering_distance_rows=sampleDists,
+                    clustering_distance_cols=sampleDists,
+                    annotation_row = df,          
+                    annotation_colors = ann_colors, 
+                    fontisze = 4)
+
+#ggsave(filename="all-samples_heatmap.png", plot=heatmap, device="png", width=6, height=6, units=c("in"))
+```
+
+## PCA plot
+```{r PCA_all, fig.height=6, fig.width=6, dpi = 500}
+PCArld <- plotPCA(rld, intgroup = c("condition"),  returnData=TRUE)
+percentVar <- round(100 * attr(PCArld, "percentVar"))
+
+ggplot(PCArld, aes(PC1, PC2, color=condition)) +
+  geom_text_repel(data=PCArld, aes(label=name), size=2, max.overlaps = Inf )+
+  geom_point(size=2, alpha=.9) +
+  scale_colour_manual(values=colors)+
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  theme_bw()+
+  ggtitle("ALl Samples PCA Plot")+
+  theme(plot.title = element_text( face ="bold", size=12, hjust=0.5))
+
+#ggsave(filename="all-samples_PCA_rld.png", device ="png", height = 4, width = 5, units = c("in"), dpi = 500)
+```
+
+## MDS plot
+```{r MDS_all, fig.height=5, fig.width=6,  dpi =500}
+mds <- data.frame(cmdscale(sampleDistMatrix))
+mds <- cbind(mds, as.data.frame(colData(rld)))
+
+qplot(X1,X2,color=condition, data=mds)+
+  geom_point(size=2, alpha=1) +
+  scale_colour_manual(values=colors)+
+  theme_bw()+
+  ggtitle("ALl Samples MDS Plot")+
+  theme(plot.title = element_text( face ="bold", size=14, hjust=0.5))
+```
+
+
+## Cleaning data based on clustering
+From looking at the above diagnostic plots, it's obvious that a lot of the samples cluster very, very well. However, there are a couple outliers identified from the hierarchical clustering and from the PCA clustering. I am going to remove those from the data so we only have quadruplicates for further analysis.
+
+Remove:
+cdaA-4, UA159-4, UAB10-4, lad-5, but-5, BLBGC-3 (this one was just kind of guess since these cluster so well)
+
+```{r}
+colData <- colData[!(row.names(colData) %in% c("BLBGC-3", "UA159-4", "UAB10-4", "cdaA-4", "lad-5", "but-5")),]
+countData <- countData[,!(names(countData) %in% c("BLBGC-3", "UA159-4", "UAB10-4", "cdaA-4", "lad-5", "but-5"))]
+```
+
+
+**Run DESeq2**
+```{r run_DESeq_all_subset}
+dds <- DESeqDataSetFromMatrix(countData = countData, colData = colData, design = ~condition)
+dds <- DESeq(dds)
+```
+
+**Transform data**
+```{r data_transformations_all_subset}
+rld <- rlog(dds)
+vsd <- vst(dds)
+```
+
+
+## Heat map of sample distances with cleaned samples
+```{r heatmap_all_subset,fig.height=4.5, fig.width=5,  dpi = 500}
+
+#Preparing Annotation Dataframe
+df <- as.data.frame(colData(rld))
+df <- select(df, -Rep, -sizeFactor )
+rownames(df) <- colnames(rld)
+names(colors) = groups
+ann_colors = list(condition = colors)
+
+#Preparing Sample Distnace Matrix
+sampleDists <- dist( t( assay(rld) ) )
+sampleDistMatrix <- as.matrix(sampleDists)
+colnames(sampleDistMatrix) <- NULL
+
+#Create the Heatmap with Pheatmap
+heatmap <- pheatmap(sampleDistMatrix,
+                    clustering_distance_rows=sampleDists,
+                    clustering_distance_cols=sampleDists,
+                    annotation_row = df,          
+                    annotation_colors = ann_colors, 
+                    fontisze = 2)
+
+#ggsave(filename="all-samples_heatmap.png", plot=heatmap, device="png", width=6, height=6, units=c("in"))
+```
+
+## PCA plot with cleaned samples
+```{r PCA_all_subset, fig.height=6, fig.width=6, dpi = 500}
+PCArld <- plotPCA(rld, intgroup = c("condition"),  returnData=TRUE)
+percentVar <- round(100 * attr(PCArld, "percentVar"))
+
+ggplot(PCArld, aes(PC1, PC2, color=condition)) +
+  geom_text_repel(data=PCArld, aes(label=name), size=2, max.overlaps = Inf )+
+  geom_point(size=2, alpha=.9) +
+  scale_colour_manual(values=colors)+
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  theme_bw()+
+  ggtitle("All Selected Samples PCA Plot")+
+  theme(plot.title = element_text( face ="bold", size=12, hjust=0.5))
+
+#ggsave(filename="all-samples_PCA_rld.png", device ="png", height = 4, width = 5, units = c("in"), dpi = 500)
+```
+
+
+# 2.0 Subset data: BLBGC
+```{r }
+
+######CHANGE THE BELOW VARIABLES DEPENDING ON THE SAMPLE!!!!!
+treatment = "BLBGC" #Change this value based on sample group
+colors = c("dodgerblue1", "#003f5c") #Change this value based on sample group
+colData_sub <- filter(colData, grepl("BLBGC|UAB10", condition))  #Change this value based on sample group
+
+number_of_genes = 50 #Change this value based on the number of genes you want to be displayed in the heat maps
+
+control = "UAB10"
+countData_sub <- select(countData, contains(c(paste0(treatment), paste0(control))))
+head(countData_sub)
+```
+
+## Create a DESeq data set
+```{r }
+dds_sub <- DESeqDataSetFromMatrix(countData = countData_sub, colData = colData_sub, design = ~ condition)
+```
+
+## Data transformations and sample distances
+```{r }
+rld <- rlog(dds_sub)
+vsd <- vst(dds_sub)
+head(assay(rld))
+```
+
+```{r }
+sampleDists <- dist( t( assay(rld) ) )
+sampleDists
+```
+
+## Heat map visualizing sample distances
+```{r , fig.height=5, fig.width=6,  dpi = 500}
+
+#Preparing Annotation Dataframe
+df <- as.data.frame(colData(rld))
+df <- select(df, -Rep, -sizeFactor )
+rownames(df) <- colnames(rld)
+names(colors) = c(paste0(control), paste0(treatment))
+ann_colors = list(condition = colors)
+
+#Preparing Sample Distnace Matrix
+sampleDistMatrix <- as.matrix(sampleDists)
+colnames(sampleDistMatrix) <- NULL
+
+#Create the Heatmap with Pheatmap
+heatmap <- pheatmap(sampleDistMatrix,
+                    clustering_distance_rows=sampleDists,
+                    clustering_distance_cols=sampleDists,
+                    annotation_row = df,          
+                    annotation_colors = ann_colors)
+print(heatmap)
+
+#ggsave(filename=paste0("UAB10_",treatment,"/UAB10_",treatment,"_vst_heatmap.png"), plot=heatmap, device="png", width=6, height=6, units=c("in"))
+```
+
+## PCA plot 
+```{r , fig.height=5, fig.width=5, dpi = 500}
+PCArld <- plotPCA(rld, intgroup = c("condition"),  returnData=TRUE)
+percentVar <- round(100 * attr(PCArld, "percentVar"))
+
+ggplot(PCArld, aes(PC1, PC2, color=condition)) +
+  #geom_text_repel(data=PCAvsd, aes(label=name), size=4 )+
+  geom_point(size=2, alpha=1) +
+  scale_colour_manual(values=colors)+
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  theme_bw()+
+  ggtitle(paste0(control," vs. ", treatment, " PCA Plot"))+
+  theme(plot.title = element_text( face ="bold", size=14, hjust=0.5))
+
+#ggsave(filename=paste0("UAB10_",treatment,"/UAB10_",treatment,"_PCA_rld.png"), device ="png", height = 4, width = 5, units = c("in"), dpi = 500)
+```
+
+## MDS plot 
+```{r , fig.height=4, fig.width=5, dpi =500}
+mds <- data.frame(cmdscale(sampleDistMatrix))
+mds <- cbind(mds, as.data.frame(colData(rld)))
+
+qplot(X1,X2,color=condition, data=mds)+
+  geom_point(size=2, alpha=1) +
+  scale_colour_manual(values=colors)+
+  theme_bw()+
+  ggtitle(paste0(control," vs. ", treatment, " MDS Plot"))+
+  theme(plot.title = element_text( face ="bold", size=14, hjust=0.5))
+```
+
+## Running DESeq2
+Make sure that the control is the first level in the factor, 
+so that the default log2 fold changes are calculated as treated over untreated.
+```{r}
+dds_sub$condition <- relevel(dds_sub$condition, paste0(control))
+```
+
+```{r }
+dds_sub <- DESeq(dds_sub)
+res <- results(dds_sub, contrast=c("condition", paste0(treatment), paste0(control)))
+results_tab <- merge(as.data.frame(res), as.data.frame(counts(dds_sub, normalized=F)), by="row.names", sort=FALSE)
+colnames(results_tab)[1] ="Gene"
+filename = paste0(control, "_", treatment,"_DeSeq2_DEGS.csv")
+write.csv(results_tab, row.names = FALSE, file=paste0(control, "_", treatment,"_DeSeq2_DEGS.csv"))
+```
+
+**Sumarizing the results**
+```{r }
+summary(res)
+```
+
+**Finding significant genes**
+```{r }
+resSig <- subset(res, padj < 0.05)
+head(resSig[ order( resSig$log2FoldChange ), ])
+```
+
+## Boxplot of Outliers
+You can make a boxplot of the Cook’s distances to see if one sample is consistently higher than others:
+```{r , dpi =300}
+par(mar=c(8,5,2,2))
+boxplot(log10(assays(dds_sub)[["cooks"]]), range=0, las=2)
+```
+
+##Gene counts
+```{r , dpi = 500}
+topGene <- rownames(res)[which.min(res$padj)]
+plotCounts(dds_sub, gene=topGene, intgroup=c("condition"))
+```
+
+## MA Plot 
+```{r , dpi = 500}
+plotMA(res, ylim=c(-5,5))
+```
+
+## Dispersion estimate 
+```{r , dpi =500}
+plotDispEsts(dds_sub) 
+```
+
+## P-value histogram
+Excludes gene values with very small counts.
+```{r , dpi = 500}
+hist(res$pvalue[res$baseMean > 1], breaks=20, col="grey50", border="white")
+```
+
+## Genes with the top variance
+```{r , fig.width = 3, fig.height = 6, dpi = 500}
+topVarGenes <- head(order(-rowVars(assay(rld))), number_of_genes)
+mat <- assay(rld)[ topVarGenes, ]
+mat <- mat - rowMeans(mat)
+rownames(df) <- colnames(mat)
+
+heatmap <- pheatmap(mat, 
+         annotation_col=df,   
+         cluster_rows = FALSE,
+         annotation_colors = ann_colors,
+         fontsize = 6)
+
+#ggsave(filename=paste0("UAB10_",treatment,"/UAB10_",treatment,"_top-",number_of_genes,"_variance-genes_heatmap.png"), plot=heatmap, device="png", width=4, height=8, units=c("in"))
+```
+
+## Sample variance with the top number of Log2FC Genes
+```{r , fig.width = 3, fig.height = 6, dpi = 500}
+#Get the top N number of genes according to Log2FC, and add a "*" to those that are significant (padj < .05)
+results_top <- res %>% as.data.frame %>% tibble::rownames_to_column(var = "gene") %>% 
+  mutate(gene_star = if_else(padj < .05, paste0(gene, "*"), gene)) %>%
+  mutate(abs_L2FC = abs(log2FoldChange)) %>%
+  arrange(desc(abs_L2FC)) 
+results_top <- results_top[1:number_of_genes,]
+top_genes <- unlist(results_top$gene_star) 
+
+# Filter the data choosing only genes whose variances are in the top Log2FC Genes
+df_by_gene <- data.frame(assay(rld))
+names(df_by_gene) <- gsub(x = names(df_by_gene), pattern = "\\.", replacement = "-")  #For some reason the names get changed to "UAB10.1" when you conver to a df, so you have to sub in a "-" for the "."
+df_by_gene <- rownames_to_column(df_by_gene, var="gene")
+df_by_gene <- inner_join(df_by_gene,results_top, by="gene" ) 
+df_by_gene <- arrange(df_by_gene, desc(abs_L2FC))
+df_by_gene_plot <- df_by_gene %>% select(-c("gene", "baseMean", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj", "abs_L2FC")) %>% relocate("gene_star") %>% remove_rownames %>% column_to_rownames(var="gene_star") %>% as.matrix()
+
+df_by_gene_plot_means <- df_by_gene_plot - rowMeans(df_by_gene_plot)
+
+heatmap <- pheatmap(df_by_gene_plot_means, 
+          annotation_col=df,          
+         cluster_rows = FALSE, # Don't cluster the rows of the heatmap (genes in this case)
+         clustering_distance_cols= sampleDists,
+         annotation_colors = ann_colors,
+         main="* indicates padj < .05", 
+         fontsize = 6) 
+
+#ggsave(filename=paste0("UAB10_",treatment,"/UAB10_",treatment,"_top-",number_of_genes,"-Log2FC_genes_variance-genes_heatmap.png"), plot=heatmap, device="png", width=4, height=8, units=c("in"))
+
+```
+
+
+
+## Volcano plot with labels
+```{r , dpi = 500}
+pval_cutoff = .05
+FC_cutoff = 2
+
+Vol <- EnhancedVolcano(res, 
+                       lab = rownames(res),
+                       labSize = 1,                     
+                       x = 'log2FoldChange',
+                       y = 'padj',
+                       title = paste0(control," vs. ", treatment),
+                       subtitle = paste0("padj cutoff ", pval_cutoff, ", Fold Change cutoff ", FC_cutoff),
+                       pCutoff = pval_cutoff,
+                       FCcutoff = FC_cutoff,
+                       pointSize = 1,
+                       labCol = 'black',
+                       titleLabSize = 8,
+                       subtitleLabSize = 8,
+                       axisLabSize = 7,
+                       legendPosition = 'bottom',
+                       legendLabSize = 6,
+                       legendIconSize = 2.0,
+                       max.overlaps = 80,
+                       drawConnectors = TRUE,
+                       widthConnectors = 0.2, 
+                       border="full",
+                       borderWidth = .5, 
+                       gridlines.major = FALSE,
+                       gridlines.minor = FALSE)
+Vol
+#ggsave(file=paste0("UA159_",treatment,"/UA159_",treatment,"_pval_", pval_cutoff, "_FC_", FC_cutoff,"_VolcanoPlot_with-labels.png"), device="png", width=7, height=7, units=c("in"))
+
+```
+
+## Volcano plot without labels
+```{r , dpi = 500}
+Vol <- EnhancedVolcano(res, 
+                       lab = rownames(res),
+                       labSize = 0.0,                   
+                       x = 'log2FoldChange',
+                       y = 'padj',
+                       title = paste0(control," vs. ", treatment),
+                       subtitle = paste0("padj cutoff ", pval_cutoff, ", Fold Change cutoff ", FC_cutoff),
+                       pCutoff = pval_cutoff,
+                       FCcutoff = FC_cutoff,
+                       pointSize = 1,
+                       labCol = 'black',
+                       titleLabSize = 8,
+                       subtitleLabSize = 8,
+                       axisLabSize = 7,
+                       legendPosition = 'bottom',
+                       legendLabSize = 6,
+                       legendIconSize = 2.0,
+                       max.overlaps = 80,
+                       border="full",
+                       borderWidth = .5, 
+                       gridlines.major = FALSE,
+                       gridlines.minor = FALSE)
+Vol
+#ggsave(file=paste0("UA159_",treatment,"/UA159_",treatment,"_pval_", pval_cutoff, "_FC_", FC_cutoff,"_VolcanoPlot_no-labels.png"), device="png", width=7, height=7, units=c("in"))
+
+```
+
